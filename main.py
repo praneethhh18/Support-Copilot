@@ -341,3 +341,26 @@ Do NOT answer from general knowledge. Only use provided cases."""
         "sources": sources,
         "chunks_found": len(result.data) if result.data else 0
     }
+@app.get("/notes")
+async def get_notes():
+    result = supabase.table("notes").select("*").limit(1).execute()
+    if result.data:
+        return {"content": result.data[0]["content"], "id": result.data[0]["id"]}
+    return {"content": "", "id": None}
+
+@app.post("/notes")
+async def save_notes(payload: dict):
+    content = payload.get("content", "")
+    note_id = payload.get("id", None)
+    
+    if note_id:
+        supabase.table("notes").update({
+            "content": content,
+            "updated_at": "now()"
+        }).eq("id", note_id).execute()
+    else:
+        supabase.table("notes").insert({"content": content}).execute()
+    
+    return {"status": "saved"}
+
+    
