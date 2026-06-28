@@ -1,0 +1,9 @@
+CX: my email is not working since morning i cant send anything
+AGENT: can you tell me which email client you are using?
+CX: i am using outlook
+AGENT: okay let me check your account settings
+AGENT: i can see your SMTP settings are incorrect
+CX: how to fix it
+AGENT: go to account settings and change SMTP port to 587
+CX: okay done it is working now thank you
+RESOLUTION: SMTP port was misconfigured, changed to 587
