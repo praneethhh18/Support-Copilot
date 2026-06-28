@@ -6,3 +6,4 @@ venv/
 .env*
 deploy.zip
 support-copilot-key.pem
+*.pem
