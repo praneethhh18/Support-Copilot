@@ -227,6 +227,103 @@ async def upload_products(file: UploadFile = File(...)):
         "products": [p["name"] for p in products]
     }
 
+@app.post("/chat")
+async def chat(payload: dict):
+    messages = payload.get("messages", [])
+    
+    if not messages:
+        return {"error": "No messages provided"}
+
+    # Get the latest customer message
+    latest_message = messages[-1]["content"]
+
+    # Embed and search KB
+    query_embedding = get_embedding(latest_message)
+
+    result = supabase.rpc("match_chunks", {
+        "query_embedding": query_embedding,
+        "match_count": 5
+    }).execute()
+
+    product_result = supabase.rpc("match_products", {
+        "query_embedding": query_embedding,
+        "match_count": 3
+    }).execute()
+
+    context = ""
+    sources = []
+    if result.data:
+        for i, chunk in enumerate(result.data):
+            context += f"\nCase {i+1}:\n{chunk['content']}\n"
+            sources.append(chunk.get("transcript_id", "unknown"))
+
+    product_context = ""
+    if product_result.data:
+        for p in product_result.data:
+            product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
+
+    # Build conversation history for Nova
+    history = ""
+    for msg in messages[:-1]:
+        role = "Support Agent" if msg["role"] == "agent" else "Customer"
+        history += f"{role}: {msg['content']}\n"
+
+    pitch_section = ""
+    if product_context:
+        pitch_section = f"""
+RELEVANT PRODUCTS TO PITCH:
+{product_context}
+4. PITCH OPPORTUNITY - Suggest only if genuinely relevant."""
+
+    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email, domain, and account management services.
+
+CONVERSATION SO FAR:
+{history}
+
+LATEST CUSTOMER MESSAGE:
+\"\"\"{latest_message}\"\"\"
+
+Based ONLY on similar past support cases below, help the support agent:
+1. LIKELY ISSUE - What is probably wrong based on full conversation context
+2. PROBE QUESTIONS - What to ask next (max 3, don't repeat already asked questions)
+3. RESOLUTION PATH - Steps to resolve based on past cases
+{pitch_section}
+
+Similar past cases:
+{context if context else "No similar cases found in KB."}
+
+IMPORTANT: 
+- Consider the full conversation history to avoid repeating questions
+- If issue becomes clearer from conversation, give more specific resolution
+- If no similar cases found say "No similar case found, please escalate"
+- Be concise and practical"""
+
+    body = json.dumps({
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"text": prompt}]
+            }
+        ],
+        "inferenceConfig": {"maxTokens": 600}
+    })
+
+    response = bedrock.invoke_model(
+        modelId="amazon.nova-pro-v1:0",
+        body=body,
+        contentType="application/json",
+        accept="application/json"
+    )
+
+    result_nova = json.loads(response["body"].read())
+    nova_response = result_nova["output"]["message"]["content"][0]["text"]
+
+    return {
+        "nova_response": nova_response,
+        "sources": sources,
+        "chunks_found": len(result.data) if result.data else 0
+    }
+
 @app.post("/search")
 async def search(payload: dict):
     customer_message = payload.get("message", "")

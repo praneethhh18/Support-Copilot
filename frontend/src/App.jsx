@@ -1,7 +1,144 @@
 import { useState } from "react";
 import axios from "axios";
 
-const API = "http://localhost:8000";
+const API = "https://copilot.nexusagent.in";
+
+function ChatPanel() {
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const send = async () => {
+    if (!input.trim()) return;
+
+    const newMessages = [...messages, { role: "customer", content: input }];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+
+    try {
+      const res = await axios.post(`${API}/chat`, { messages: newMessages });
+      setMessages([...newMessages, { role: "system", content: res.data.nova_response, chunks: res.data.chunks_found }]);
+    } catch (e) {
+      setMessages([...newMessages, { role: "system", content: "Error connecting to server.", chunks: 0 }]);
+    }
+    setLoading(false);
+  };
+
+  const clear = () => {
+    setMessages([]);
+    setInput("");
+  };
+
+  return (
+    <div style={{ padding: "16px" }}>
+      {messages.length === 0 && (
+        <p style={{ color: "#a0a0b0", fontSize: "13px", textAlign: "center", marginBottom: "12px" }}>
+          Paste customer message to start
+        </p>
+      )}
+
+      <div style={{ marginBottom: "12px", maxHeight: "50vh", overflowY: "auto" }}>
+        {messages.map((msg, i) => (
+          <div key={i} style={{
+            marginBottom: "10px",
+            padding: "10px 12px",
+            borderRadius: "8px",
+            background: msg.role === "customer" ? "#1e1e3f" : msg.role === "system" ? "#0f2f1f" : "#1e1e2e",
+            border: `1px solid ${msg.role === "customer" ? "#4f46e5" : msg.role === "system" ? "#166534" : "#333"}`
+          }}>
+            <p style={{
+              fontSize: "11px",
+              color: msg.role === "customer" ? "#a78bfa" : "#4ade80",
+              marginBottom: "6px",
+              fontWeight: "bold"
+            }}>
+              {msg.role === "customer" ? "👤 Customer" : "🤖 Co-Pilot"}
+              {msg.chunks !== undefined && (
+                <span style={{ color: "#a0a0b0", fontWeight: "normal", marginLeft: "8px" }}>
+                  {msg.chunks} case(s) found
+                </span>
+              )}
+            </p>
+            <pre style={{
+              color: "#e0e0f0",
+              fontSize: "13px",
+              whiteSpace: "pre-wrap",
+              lineHeight: "1.6",
+              margin: 0
+            }}>
+              {msg.content}
+            </pre>
+          </div>
+        ))}
+        {loading && (
+          <div style={{
+            padding: "10px 12px",
+            borderRadius: "8px",
+            background: "#0f2f1f",
+            border: "1px solid #166534",
+            color: "#4ade80",
+            fontSize: "13px"
+          }}>
+            🤖 Analysing...
+          </div>
+        )}
+      </div>
+
+      <textarea
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder="Paste customer message here..."
+        rows={3}
+        style={{
+          width: "100%",
+          padding: "12px",
+          borderRadius: "8px",
+          border: "1px solid #333",
+          background: "#1e1e2e",
+          color: "white",
+          fontSize: "14px",
+          resize: "vertical",
+          boxSizing: "border-box"
+        }}
+      />
+
+      <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+        <button
+          onClick={send}
+          disabled={loading}
+          style={{
+            flex: 1,
+            padding: "12px",
+            background: loading ? "#333" : "#4f46e5",
+            color: "white",
+            border: "none",
+            borderRadius: "8px",
+            fontSize: "15px",
+            cursor: loading ? "not-allowed" : "pointer",
+            fontWeight: "bold"
+          }}
+        >
+          {loading ? "Analysing..." : "Analyse"}
+        </button>
+        <button
+          onClick={clear}
+          style={{
+            padding: "12px 16px",
+            background: "#1e1e2e",
+            color: "#a0a0b0",
+            border: "1px solid #333",
+            borderRadius: "8px",
+            fontSize: "13px",
+            cursor: "pointer"
+          }}
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function ChatTab({ tabId, activeTab, setActiveTab }) {
   return (
@@ -19,88 +156,6 @@ function ChatTab({ tabId, activeTab, setActiveTab }) {
     >
       Chat {tabId}
     </button>
-  );
-}
-
-function ChatPanel() {
-  const [message, setMessage] = useState("");
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const search = async () => {
-    if (!message.trim()) return;
-    setLoading(true);
-    setResult(null);
-    try {
-      const res = await axios.post(`${API}/search`, { message });
-      setResult(res.data);
-    } catch (e) {
-      setResult({ nova_response: "Error connecting to server." });
-    }
-    setLoading(false);
-  };
-
-  return (
-    <div style={{ padding: "16px" }}>
-      <textarea
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        placeholder="Paste customer message here..."
-        rows={4}
-        style={{
-          width: "100%",
-          padding: "12px",
-          borderRadius: "8px",
-          border: "1px solid #333",
-          background: "#1e1e2e",
-          color: "white",
-          fontSize: "14px",
-          resize: "vertical",
-          boxSizing: "border-box"
-        }}
-      />
-      <button
-        onClick={search}
-        disabled={loading}
-        style={{
-          marginTop: "10px",
-          width: "100%",
-          padding: "12px",
-          background: loading ? "#333" : "#4f46e5",
-          color: "white",
-          border: "none",
-          borderRadius: "8px",
-          fontSize: "15px",
-          cursor: loading ? "not-allowed" : "pointer",
-          fontWeight: "bold"
-        }}
-      >
-        {loading ? "Analysing..." : "Analyse"}
-      </button>
-
-      {result && (
-        <div style={{
-          marginTop: "16px",
-          background: "#1e1e2e",
-          borderRadius: "8px",
-          padding: "16px",
-          border: "1px solid #333"
-        }}>
-          <p style={{ color: "#a0a0b0", fontSize: "12px", marginBottom: "8px" }}>
-            {result.chunks_found} similar case(s) found
-          </p>
-          <pre style={{
-            color: "#e0e0f0",
-            fontSize: "13px",
-            whiteSpace: "pre-wrap",
-            lineHeight: "1.6",
-            margin: 0
-          }}>
-            {result.nova_response}
-          </pre>
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -400,9 +455,9 @@ export default function App() {
             borderRadius: "0 8px 8px 8px",
             border: "1px solid #333"
           }}>
-            {activeTab === 1 && <ChatPanel key={1} />}
-            {activeTab === 2 && <ChatPanel key={2} />}
-            {activeTab === 3 && <ChatPanel key={3} />}
+            {activeTab === 1 && <ChatPanel key="chat-1" />}
+            {activeTab === 2 && <ChatPanel key="chat-2" />}
+            {activeTab === 3 && <ChatPanel key="chat-3" />}
           </div>
         </>
       )}
