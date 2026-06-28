@@ -69,20 +69,12 @@ Transcript:
 
 Reply with only one word, nothing else."""
 
-    body = json.dumps({
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 10}
-    })
-
-    response = bedrock.invoke_model(
-        modelId="amazon.nova-pro-v1:0",
-        body=body,
-        contentType="application/json",
-        accept="application/json"
+    response = bedrock.converse(
+        modelId="us.amazon.nova-pro-v1:0",
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": 10}
     )
-
-    result = json.loads(response["body"].read())
-    category = result["output"]["message"]["content"][0]["text"].strip().lower()
+    category = response["output"]["message"]["content"][0]["text"].strip().lower()
     valid = ["email", "network", "domain", "account", "general"]
     return category if category in valid else "general"
 
@@ -92,46 +84,13 @@ def auto_detect_status(text: str):
         return "solved"
     return "unsolved"
 
-def ask_nova(context: str, customer_message: str, product_context: str):
-    pitch_section = ""
-    if product_context:
-        pitch_section = f"""
-
-RELEVANT PRODUCTS TO PITCH (only suggest if it genuinely helps the customer):
-{product_context}
-
-4. PITCH OPPORTUNITY - Suggest a relevant product/upgrade if it solves their problem. Include price and discount if available. If nothing fits, skip this."""
-
-    prompt = f"""You are an expert customer support assistant for a company that provides network solutions, email, domain, and account management services.
-
-A customer has sent this message:
-\"\"\"{customer_message}\"\"\"
-
-Based ONLY on the following similar past support cases, help the support agent by identifying:
-1. LIKELY ISSUE - What is probably wrong
-2. PROBE QUESTIONS - What to ask the customer next (3 questions max)
-3. RESOLUTION PATH - Steps to resolve based on past cases
-{pitch_section}
-
-Similar past cases:
-{context}
-
-IMPORTANT: Only use information from the past cases and products above. If nothing is relevant say "No similar case found, please escalate." Do not make up information. Be concise and practical."""
-
-    body = json.dumps({
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 600}
-    })
-
-    response = bedrock.invoke_model(
-        modelId="amazon.nova-pro-v1:0",
-        body=body,
-        contentType="application/json",
-        accept="application/json"
+def ask_nova(prompt: str, max_tokens: int = 600):
+    response = bedrock.converse(
+        modelId="us.amazon.nova-pro-v1:0",
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": max_tokens}
     )
-
-    result = json.loads(response["body"].read())
-    return result["output"]["message"]["content"][0]["text"]
+    return response["output"]["message"]["content"][0]["text"]
 
 def parse_product_file(text: str):
     products = []
@@ -162,6 +121,16 @@ def parse_product_file(text: str):
 @app.get("/")
 def root():
     return {"status": "Support Copilot API is running"}
+
+@app.get("/test-bedrock")
+def test_bedrock():
+    response = bedrock.converse(
+        modelId="us.amazon.nova-pro-v1:0",
+        messages=[{"role": "user", "content": [{"text": "Say hello in one sentence."}]}],
+        inferenceConfig={"maxTokens": 100}
+    )
+    result = response["output"]["message"]["content"][0]["text"]
+    return {"response": result}
 
 @app.post("/upload-transcript")
 async def upload_transcript(file: UploadFile = File(...)):
@@ -227,17 +196,83 @@ async def upload_products(file: UploadFile = File(...)):
         "products": [p["name"] for p in products]
     }
 
+@app.post("/search")
+async def search(payload: dict):
+    customer_message = payload.get("message", "")
+
+    if not customer_message:
+        return {"error": "No message provided"}
+
+    query_embedding = get_embedding(customer_message)
+
+    result = supabase.rpc("match_chunks", {
+        "query_embedding": query_embedding,
+        "match_count": 5
+    }).execute()
+
+    product_result = supabase.rpc("match_products", {
+        "query_embedding": query_embedding,
+        "match_count": 3
+    }).execute()
+
+    if not result.data:
+        return {
+            "nova_response": "No similar cases found. Please escalate.",
+            "sources": [],
+            "chunks_found": 0
+        }
+
+    context = ""
+    sources = []
+    for i, chunk in enumerate(result.data):
+        context += f"\nCase {i+1}:\n{chunk['content']}\n"
+        sources.append(chunk.get("transcript_id", "unknown"))
+
+    product_context = ""
+    if product_result.data:
+        for p in product_result.data:
+            product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
+
+    pitch_section = ""
+    if product_context:
+        pitch_section = f"""
+RELEVANT PRODUCTS TO PITCH:
+{product_context}
+4. PITCH OPPORTUNITY - Suggest only if genuinely relevant."""
+
+    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email, domain, and account management services.
+
+A customer has sent this message:
+\"\"\"{customer_message}\"\"\"
+
+Based ONLY on the following similar past support cases, help the support agent by identifying:
+1. LIKELY ISSUE - What is probably wrong
+2. PROBE QUESTIONS - What to ask the customer next (3 questions max)
+3. RESOLUTION PATH - Steps to resolve based on past cases
+{pitch_section}
+
+Similar past cases:
+{context}
+
+IMPORTANT: Only use information from the past cases above. If nothing is relevant say "No similar case found, please escalate." Do not make up information. Be concise and practical."""
+
+    nova_response = ask_nova(prompt)
+
+    return {
+        "nova_response": nova_response,
+        "sources": sources,
+        "chunks_found": len(result.data)
+    }
+
 @app.post("/chat")
 async def chat(payload: dict):
     messages = payload.get("messages", [])
-    
+
     if not messages:
         return {"error": "No messages provided"}
 
-    # Get the latest customer message
     latest_message = messages[-1]["content"]
 
-    # Embed and search KB
     query_embedding = get_embedding(latest_message)
 
     result = supabase.rpc("match_chunks", {
@@ -262,7 +297,6 @@ async def chat(payload: dict):
         for p in product_result.data:
             product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
 
-    # Build conversation history for Nova
     history = ""
     for msg in messages[:-1]:
         role = "Support Agent" if msg["role"] == "agent" else "Customer"
@@ -292,81 +326,18 @@ Based ONLY on similar past support cases below, help the support agent:
 Similar past cases:
 {context if context else "No similar cases found in KB."}
 
-IMPORTANT: 
-- Consider the full conversation history to avoid repeating questions
-- If issue becomes clearer from conversation, give more specific resolution
-- If no similar cases found say "No similar case found, please escalate"
-- Be concise and practical"""
+STRICT RULE: If no similar cases are provided above, you MUST respond with exactly:
+"No similar case in knowledge base. Please probe manually:
+- What exactly is the issue?
+- When did it start?
+- Any recent changes made?"
 
-    body = json.dumps({
-        "messages": [
-            {
-                "role": "user",
-                "content": [{"text": prompt}]
-            }
-        ],
-        "inferenceConfig": {"maxTokens": 600}
-    })
+Do NOT answer from general knowledge. Only use provided cases."""
 
-    response = bedrock.invoke_model(
-        modelId="amazon.nova-pro-v1:0",
-        body=body,
-        contentType="application/json",
-        accept="application/json"
-    )
-
-    result_nova = json.loads(response["body"].read())
-    nova_response = result_nova["output"]["message"]["content"][0]["text"]
+    nova_response = ask_nova(prompt)
 
     return {
         "nova_response": nova_response,
         "sources": sources,
         "chunks_found": len(result.data) if result.data else 0
-    }
-
-@app.post("/search")
-async def search(payload: dict):
-    customer_message = payload.get("message", "")
-
-    if not customer_message:
-        return {"error": "No message provided"}
-
-    query_embedding = get_embedding(customer_message)
-
-    # Search support KB
-    result = supabase.rpc("match_chunks", {
-        "query_embedding": query_embedding,
-        "match_count": 5
-    }).execute()
-
-    # Search product KB
-    product_result = supabase.rpc("match_products", {
-        "query_embedding": query_embedding,
-        "match_count": 3
-    }).execute()
-
-    if not result.data:
-        return {
-            "nova_response": "No similar cases found. Please escalate.",
-            "sources": [],
-            "chunks_found": 0
-        }
-
-    context = ""
-    sources = []
-    for i, chunk in enumerate(result.data):
-        context += f"\nCase {i+1}:\n{chunk['content']}\n"
-        sources.append(chunk.get("transcript_id", "unknown"))
-
-    product_context = ""
-    if product_result.data:
-        for p in product_result.data:
-            product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
-
-    nova_response = ask_nova(context, customer_message, product_context)
-
-    return {
-        "nova_response": nova_response,
-        "sources": sources,
-        "chunks_found": len(result.data)
     }
