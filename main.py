@@ -68,7 +68,6 @@ Transcript:
 {preview}
 
 Reply with only one word, nothing else."""
-
     response = bedrock.converse(
         modelId="us.amazon.nova-pro-v1:0",
         messages=[{"role": "user", "content": [{"text": prompt}]}],
@@ -84,7 +83,7 @@ def auto_detect_status(text: str):
         return "solved"
     return "unsolved"
 
-def ask_nova(prompt: str, max_tokens: int = 600):
+def ask_nova(prompt: str, max_tokens: int = 800):
     response = bedrock.converse(
         modelId="us.amazon.nova-pro-v1:0",
         messages=[{"role": "user", "content": [{"text": prompt}]}],
@@ -196,6 +195,113 @@ async def upload_products(file: UploadFile = File(...)):
         "products": [p["name"] for p in products]
     }
 
+@app.post("/chat")
+async def chat(payload: dict):
+    messages = payload.get("messages", [])
+
+    if not messages:
+        return {"error": "No messages provided"}
+
+    # Build full conversation history
+    history = ""
+    all_customer_info = []
+    for msg in messages[:-1]:
+        if msg["role"] == "customer":
+            history += f"Customer: {msg['content']}\n"
+            all_customer_info.append(msg['content'])
+        else:
+            history += f"Agent Co-Pilot: {msg['content']}\n"
+
+    latest_message = messages[-1]["content"]
+    all_customer_info.append(latest_message)
+
+    # Combine all customer info for better embedding search
+    full_context_query = " ".join(all_customer_info)
+
+    # Search KB using combined context for better retrieval
+    query_embedding = get_embedding(full_context_query)
+
+    result = supabase.rpc("match_chunks", {
+        "query_embedding": query_embedding,
+        "match_count": 5
+    }).execute()
+
+    product_result = supabase.rpc("match_products", {
+        "query_embedding": query_embedding,
+        "match_count": 3
+    }).execute()
+
+    # Build KB context
+    kb_context = ""
+    sources = []
+    if result.data:
+        for i, chunk in enumerate(result.data):
+            kb_context += f"\n--- Past Case {i+1} ---\n{chunk['content']}\n"
+            sources.append(chunk.get("transcript_id", "unknown"))
+
+    # Build product context
+    product_context = ""
+    if product_result.data:
+        for p in product_result.data:
+            product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
+
+    pitch_section = ""
+    if product_context:
+        pitch_section = f"""
+RELEVANT PRODUCTS (suggest only if genuinely fits customer's problem):
+{product_context}"""
+
+    # Master prompt
+    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email hosting, domain management, and account services for SIS companies.
+
+Your job is to help the support agent handle this live customer chat. Read everything carefully before responding.
+
+=== FULL CONVERSATION SO FAR ===
+{history if history else "This is the first customer message."}
+
+=== LATEST CUSTOMER MESSAGE ===
+{latest_message}
+
+=== SIMILAR PAST CASES FROM KNOWLEDGE BASE ===
+{kb_context if kb_context else "NO SIMILAR CASES FOUND IN KB."}
+{pitch_section}
+
+=== YOUR RESPONSE RULES ===
+1. Read the ENTIRE conversation history first
+2. Note everything the customer has ALREADY told you — never ask about it again
+3. Use past cases from KB as reference — if KB has relevant cases, base your answer on them
+4. If KB has NO relevant cases, say so clearly and help based on conversation context only
+
+=== YOUR RESPONSE FORMAT ===
+
+SITUATION SO FAR:
+[Summarize what we know from the full conversation in 1-2 lines]
+
+LIKELY ISSUE:
+[Most probable cause based on ALL information gathered so far — be specific, not generic]
+
+NEXT STEP:
+[ONE specific action — either: ask ONE targeted question not yet answered, OR give the exact resolution steps if enough info gathered]
+
+{"PITCH: [Suggest relevant product only if it directly solves their problem — include price and discount]" if product_context else ""}
+
+=== STRICT RULES ===
+- If customer already said their email client is Outlook — do NOT ask what email client they use
+- If customer mentioned when issue started — do NOT ask when it started  
+- Each response must MOVE THE CONVERSATION FORWARD
+- If KB cases found: reference them explicitly in your resolution
+- If NO KB cases: say "No matching case in KB" but still help based on conversation
+- Never give generic advice — be specific to what this customer told you
+- If issue is resolved, say "Issue resolved: [what fixed it]" """
+
+    nova_response = ask_nova(prompt)
+
+    return {
+        "nova_response": nova_response,
+        "sources": sources,
+        "chunks_found": len(result.data) if result.data else 0
+    }
+
 @app.post("/search")
 async def search(payload: dict):
     customer_message = payload.get("message", "")
@@ -233,28 +339,22 @@ async def search(payload: dict):
         for p in product_result.data:
             product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
 
-    pitch_section = ""
-    if product_context:
-        pitch_section = f"""
-RELEVANT PRODUCTS TO PITCH:
-{product_context}
-4. PITCH OPPORTUNITY - Suggest only if genuinely relevant."""
-
     prompt = f"""You are an expert customer support assistant for a company providing network solutions, email, domain, and account management services.
 
-A customer has sent this message:
-\"\"\"{customer_message}\"\"\"
+Customer message: \"\"\"{customer_message}\"\"\"
 
-Based ONLY on the following similar past support cases, help the support agent by identifying:
-1. LIKELY ISSUE - What is probably wrong
-2. PROBE QUESTIONS - What to ask the customer next (3 questions max)
-3. RESOLUTION PATH - Steps to resolve based on past cases
-{pitch_section}
-
-Similar past cases:
+Past cases from KB:
 {context}
 
-IMPORTANT: Only use information from the past cases above. If nothing is relevant say "No similar case found, please escalate." Do not make up information. Be concise and practical."""
+{"Products: " + product_context if product_context else ""}
+
+Help the agent with:
+1. LIKELY ISSUE
+2. PROBE QUESTIONS (max 3)
+3. RESOLUTION PATH
+{"4. PITCH OPPORTUNITY" if product_context else ""}
+
+Only use KB cases above. If nothing relevant say "No similar case found, please escalate." """
 
     nova_response = ask_nova(prompt)
 
@@ -264,83 +364,6 @@ IMPORTANT: Only use information from the past cases above. If nothing is relevan
         "chunks_found": len(result.data)
     }
 
-@app.post("/chat")
-async def chat(payload: dict):
-    messages = payload.get("messages", [])
-
-    if not messages:
-        return {"error": "No messages provided"}
-
-    latest_message = messages[-1]["content"]
-
-    query_embedding = get_embedding(latest_message)
-
-    result = supabase.rpc("match_chunks", {
-        "query_embedding": query_embedding,
-        "match_count": 5
-    }).execute()
-
-    product_result = supabase.rpc("match_products", {
-        "query_embedding": query_embedding,
-        "match_count": 3
-    }).execute()
-
-    context = ""
-    sources = []
-    if result.data:
-        for i, chunk in enumerate(result.data):
-            context += f"\nCase {i+1}:\n{chunk['content']}\n"
-            sources.append(chunk.get("transcript_id", "unknown"))
-
-    product_context = ""
-    if product_result.data:
-        for p in product_result.data:
-            product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
-
-    history = ""
-    for msg in messages[:-1]:
-        role = "Support Agent" if msg["role"] == "agent" else "Customer"
-        history += f"{role}: {msg['content']}\n"
-
-    pitch_section = ""
-    if product_context:
-        pitch_section = f"""
-RELEVANT PRODUCTS TO PITCH:
-{product_context}
-4. PITCH OPPORTUNITY - Suggest only if genuinely relevant."""
-
-    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email, domain, and account management services.
-
-CONVERSATION SO FAR:
-{history}
-
-LATEST CUSTOMER MESSAGE:
-\"\"\"{latest_message}\"\"\"
-
-Based ONLY on similar past support cases below, help the support agent:
-1. LIKELY ISSUE - What is probably wrong based on full conversation context
-2. PROBE QUESTIONS - What to ask next (max 3, don't repeat already asked questions)
-3. RESOLUTION PATH - Steps to resolve based on past cases
-{pitch_section}
-
-Similar past cases:
-{context if context else "No similar cases found in KB."}
-
-STRICT RULE: If no similar cases are provided above, you MUST respond with exactly:
-"No similar case in knowledge base. Please probe manually:
-- What exactly is the issue?
-- When did it start?
-- Any recent changes made?"
-
-Do NOT answer from general knowledge. Only use provided cases."""
-
-    nova_response = ask_nova(prompt)
-
-    return {
-        "nova_response": nova_response,
-        "sources": sources,
-        "chunks_found": len(result.data) if result.data else 0
-    }
 @app.get("/notes")
 async def get_notes():
     result = supabase.table("notes").select("*").limit(1).execute()
@@ -352,7 +375,7 @@ async def get_notes():
 async def save_notes(payload: dict):
     content = payload.get("content", "")
     note_id = payload.get("id", None)
-    
+
     if note_id:
         supabase.table("notes").update({
             "content": content,
@@ -360,7 +383,5 @@ async def save_notes(payload: dict):
         }).eq("id", note_id).execute()
     else:
         supabase.table("notes").insert({"content": content}).execute()
-    
-    return {"status": "saved"}
 
-    
+    return {"status": "saved"}
