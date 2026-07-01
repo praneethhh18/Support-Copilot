@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from supabase import create_client
@@ -43,16 +43,6 @@ def get_embedding(text: str):
     result = json.loads(response["body"].read())
     return result["embedding"]
 
-def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50):
-    words = text.split()
-    chunks = []
-    i = 0
-    while i < len(words):
-        chunk = " ".join(words[i:i+chunk_size])
-        chunks.append(chunk)
-        i += chunk_size - overlap
-    return chunks
-
 def scrub_pii(text: str):
     import re
     text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]', text)
@@ -80,7 +70,7 @@ Reply with only one word, nothing else."""
 
 def auto_detect_status(text: str):
     lower = text.lower()
-    if any(word in lower for word in ["resolution:", "resolved", "fixed", "working now", "thank you", "issue solved"]):
+    if any(word in lower for word in ["resolution:", "resolved", "fixed", "working now", "thank you", "issue solved", "resolved in one"]):
         return "solved"
     return "unsolved"
 
@@ -91,6 +81,50 @@ def ask_nova(prompt: str, max_tokens: int = 800):
         inferenceConfig={"maxTokens": max_tokens}
     )
     return response["output"]["message"]["content"][0]["text"]
+
+def extract_issues_from_transcript(text: str):
+    prompt = f"""You are a support knowledge base builder. Read this customer support chat transcript carefully.
+
+Extract ALL distinct issues discussed in this conversation. For each issue create a structured summary.
+
+Return a JSON array only — no markdown, no backticks, no explanation.
+
+Each object must have:
+- issue: what the customer's problem was (specific, detailed)
+- root_cause: what was actually causing it
+- resolution: exactly how it was fixed (step by step if possible)
+- internal_steps: what the agent did internally to fix it (which tools, which settings)
+- category: email / domain / network / account / billing / hosting / database / general
+- was_escalated: true or false
+- escalation_reason: why it was escalated (or null if not escalated)
+- keywords: list of 5-10 search keywords for this issue
+
+Transcript:
+{text[:6000]}
+
+Return ONLY valid JSON array. Nothing else."""
+
+    response = bedrock.converse(
+        modelId="us.amazon.nova-pro-v1:0",
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": 2000}
+    )
+
+    raw = response["output"]["message"]["content"][0]["text"].strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    issues = json.loads(raw)
+    return issues
+
+def format_issue_as_chunk(issue: dict) -> str:
+    return f"""ISSUE: {issue.get('issue', '')}
+ROOT CAUSE: {issue.get('root_cause', '')}
+RESOLUTION: {issue.get('resolution', '')}
+INTERNAL STEPS: {issue.get('internal_steps', '')}
+CATEGORY: {issue.get('category', '')}
+ESCALATED: {issue.get('was_escalated', False)}
+ESCALATION REASON: {issue.get('escalation_reason', 'N/A')}
+KEYWORDS: {', '.join(issue.get('keywords', []))}"""
 
 def ai_parse_products(text: str):
     prompt = f"""You are a product data extractor. Read the following messy product information and extract all products from it.
@@ -103,7 +137,6 @@ For each product you find, return a JSON array with objects containing these exa
 - best_for: what type of customer or problem this product is best for
 
 Return ONLY a valid JSON array, nothing else. No markdown, no backticks, no explanation.
-If you find multiple products, include all of them in the array.
 
 Product information:
 {text}"""
@@ -113,12 +146,9 @@ Product information:
         messages=[{"role": "user", "content": [{"text": prompt}]}],
         inferenceConfig={"maxTokens": 2000}
     )
-    
+
     raw = response["output"]["message"]["content"][0]["text"].strip()
-    
-    # Clean any markdown if present
     raw = raw.replace("```json", "").replace("```", "").strip()
-    
     products = json.loads(raw)
     return products
 
@@ -154,21 +184,41 @@ async def upload_transcript(file: UploadFile = File(...)):
         "status": status
     }).execute()
 
-    chunks = chunk_text(text)
-    for chunk in chunks:
-        embedding = get_embedding(chunk)
-        supabase.table("chunks").insert({
-            "transcript_id": transcript_id,
-            "content": chunk,
-            "embedding": embedding
-        }).execute()
+    # Smart chunking — extract structured issues instead of raw word chunks
+    try:
+        issues = extract_issues_from_transcript(text)
+        chunks_created = 0
+        for issue in issues:
+            chunk_text = format_issue_as_chunk(issue)
+            embedding = get_embedding(chunk_text)
+            supabase.table("chunks").insert({
+                "transcript_id": transcript_id,
+                "content": chunk_text,
+                "embedding": embedding
+            }).execute()
+            chunks_created += 1
+    except Exception as e:
+        # Fallback to basic chunking if extraction fails
+        words = text.split()
+        chunks_created = 0
+        i = 0
+        while i < len(words):
+            chunk = " ".join(words[i:i+300])
+            embedding = get_embedding(chunk)
+            supabase.table("chunks").insert({
+                "transcript_id": transcript_id,
+                "content": chunk,
+                "embedding": embedding
+            }).execute()
+            chunks_created += 1
+            i += 250
 
     return {
         "message": "Transcript uploaded successfully",
         "transcript_id": transcript_id,
         "category": category,
         "status": status,
-        "chunks_created": len(chunks)
+        "chunks_created": chunks_created
     }
 
 @app.post("/upload-products")
@@ -199,7 +249,7 @@ async def upload_products(files: List[UploadFile] = File(...)):
                 }).execute()
                 all_products.append(product.get("name", ""))
                 total_count += 1
-            except Exception as e:
+            except Exception:
                 continue
 
     return {
@@ -225,12 +275,11 @@ async def chat(payload: dict):
 
     latest_message = messages[-1]["content"]
     is_internal_note = latest_message.startswith("//")
-    
+
     if not is_internal_note:
         all_customer_info.append(latest_message)
 
     full_context_query = " ".join(all_customer_info)
-
     query_embedding = get_embedding(full_context_query)
 
     result = supabase.rpc("match_chunks", {
@@ -258,10 +307,10 @@ async def chat(payload: dict):
     pitch_section = ""
     if product_context:
         pitch_section = f"""
-RELEVANT PRODUCTS (suggest only if genuinely fits customer's problem):
+RELEVANT PRODUCTS (suggest only if genuinely fits customer problem):
 {product_context}"""
 
-    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email hosting, domain management, and account services for SIS companies.
+    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email hosting, domain management, and account services.
 
 Your job is to help the support agent handle this live customer chat. Read everything carefully before responding.
 
@@ -270,7 +319,7 @@ Your job is to help the support agent handle this live customer chat. Read every
 
 {"=== YOUR INTERNAL NOTE ===" if is_internal_note else "=== LATEST CUSTOMER MESSAGE ==="}
 {latest_message.replace("//", "").strip()}
-{"[This is an internal note from the agent — do NOT generate a REPLY TO CUSTOMER section. Just answer the agent's question directly and helpfully based on the conversation context and KB.]" if is_internal_note else ""}
+{"[This is an internal note from the agent — do NOT generate REPLY TO CUSTOMER. Just answer the agent question directly based on conversation and KB.]" if is_internal_note else ""}
 
 === SIMILAR PAST CASES FROM KNOWLEDGE BASE ===
 {kb_context if kb_context else "NO SIMILAR CASES FOUND IN KB."}
@@ -299,42 +348,41 @@ Rules for the reply:
 - Personalize to their exact situation — mention what they specifically said]
 
 TONE & URGENCY:
-[Detect customer's emotional state: Angry / Frustrated / Calm / Confused]
-[Urgency: High / Medium / Low — based on business impact of their issue]
+[Detect customer emotional state: Angry / Frustrated / Calm / Confused]
+[Urgency: High / Medium / Low — based on business impact]
 
 SITUATION SO FAR:
-[Summarize what we know from the full conversation in 1-2 lines]
+[Summarize what we know from full conversation in 1-2 lines]
 
 LIKELY ISSUE:
-[Most probable cause based on ALL information gathered so far — be specific, not generic]
+[Most probable cause based on ALL information gathered — be specific, not generic]
 
 WHAT TO DO INTERNALLY:
-[Exact steps for you to check or fix on your end using internal tools — be specific]
+[Exact steps to check or fix on your end — reference specific tools and settings from past cases if available]
 
 NEXT PROBE TO ASK CUSTOMER:
-[ONE specific question not yet answered — or say "Enough info, proceed with resolution" if you have everything needed]
+[ONE specific question not yet answered — or say "Enough info, proceed with resolution" if you have everything]
 
 ESCALATION SIGNAL:
 [Based on similar past cases in KB:
 - If past cases show this was escalated: warn with reason why and when to escalate
 - If past cases show agent resolved it: say "Handle yourself — similar cases resolved at agent level"
-- If no past cases found: say "No escalation pattern found — use your judgment"
-Never blindly escalate — always check KB pattern first]
+- If no past cases found: say "No escalation pattern found — use your judgment"]
 
 CLOSING MESSAGE (copy-paste after resolution):
-[A short warm professional closing message to send customer after issue is resolved — asking if everything is fine and inviting 5 star feedback naturally without directly asking for it]
+[Short warm professional closing — invite feedback naturally without directly asking for rating]
 
 {"PITCH: [Suggest relevant product only if it directly solves their problem — include price and discount]" if product_context else ""}
 
 === STRICT RULES ===
-- If customer already said their email client — do NOT ask what email client they use
-- If customer mentioned when issue started — do NOT ask when it started
+- If customer already mentioned their email client — do NOT ask again
+- If customer mentioned when issue started — do NOT ask again
 - Each response must MOVE THE CONVERSATION FORWARD
-- If KB cases found: reference them explicitly in your resolution
-- If NO KB cases: say "No matching case in KB" but still help based on conversation
+- If KB cases found: reference them explicitly in resolution
+- If NO KB cases: say "No matching case in KB" but still help
 - Never give generic advice — be specific to what this customer told you
-- If issue is resolved, say "Issue resolved: [what fixed it]" and give a short warm closing reply to customer
-- REPLY TO CUSTOMER must always be the first section — this is what agent copies and sends"""
+- If issue resolved: say "Issue resolved: [what fixed it]"
+- REPLY TO CUSTOMER must always be first section"""
 
     nova_response = ask_nova(prompt)
 
