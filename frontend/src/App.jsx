@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 
-
 const API = "https://copilot.nexusagent.in";
 
 function NotePanel({ messages, setMessages }) {
@@ -217,9 +216,21 @@ function UploadPanel() {
       <p style={{ color: "#999", fontSize: "13px", marginBottom: "12px", fontFamily: "Georgia, serif" }}>
         Attach files to this document
       </p>
-      <input type="file" accept=".txt" multiple onChange={(e) => setFiles(Array.from(e.target.files))} style={{ fontSize: "13px", color: "#555", marginBottom: "10px", display: "block" }} />
-      {files.length > 0 && <p style={{ color: "#999", fontSize: "12px", marginBottom: "8px" }}>{files.length} file(s) selected</p>}
-      <button onClick={upload} disabled={loading || files.length === 0} style={{ padding: "4px 16px", background: "none", border: "1px solid #ddd", borderRadius: "4px", fontSize: "12px", color: "#666", cursor: "pointer" }}>
+      <input
+        type="file"
+        accept=".txt"
+        multiple
+        onChange={(e) => setFiles(Array.from(e.target.files))}
+        style={{ fontSize: "13px", color: "#555", marginBottom: "10px", display: "block" }}
+      />
+      {files.length > 0 && (
+        <p style={{ color: "#999", fontSize: "12px", marginBottom: "8px" }}>{files.length} file(s) selected</p>
+      )}
+      <button
+        onClick={upload}
+        disabled={loading || files.length === 0}
+        style={{ padding: "4px 16px", background: "none", border: "1px solid #ddd", borderRadius: "4px", fontSize: "12px", color: "#666", cursor: "pointer" }}
+      >
         {loading ? "Attaching..." : "Attach"}
       </button>
       {result && !result.error && (
@@ -231,22 +242,27 @@ function UploadPanel() {
           ))}
         </div>
       )}
+      {result && result.error && (
+        <p style={{ color: "#f0a0a0", marginTop: "12px", fontSize: "13px" }}>❌ {result.error}</p>
+      )}
     </div>
   );
 }
 
 function ProductUploadPanel() {
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
 
   const upload = async () => {
-    if (!file) return;
+    if (!files || files.length === 0) return;
     setLoading(true);
     setResult(null);
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      for (const f of files) {
+        formData.append("files", f);
+      }
       const res = await axios.post(`${API}/upload-products`, formData);
       setResult(res.data);
     } catch (e) {
@@ -258,14 +274,35 @@ function ProductUploadPanel() {
   return (
     <div style={{ padding: "12px 20px" }}>
       <p style={{ color: "#999", fontSize: "13px", marginBottom: "12px", fontFamily: "Georgia, serif" }}>
-        Attach reference sheet
+        Attach reference sheet — any format, AI will parse it
       </p>
-      <input type="file" accept=".txt" onChange={(e) => setFile(e.target.files[0])} style={{ fontSize: "13px", color: "#555", marginBottom: "10px", display: "block" }} />
-      <button onClick={upload} disabled={loading || !file} style={{ padding: "4px 16px", background: "none", border: "1px solid #ddd", borderRadius: "4px", fontSize: "12px", color: "#666", cursor: "pointer" }}>
+      <input
+        type="file"
+        accept=".txt"
+        multiple
+        onChange={(e) => setFiles(Array.from(e.target.files))}
+        style={{ fontSize: "13px", color: "#555", marginBottom: "10px", display: "block" }}
+      />
+      {files.length > 0 && (
+        <p style={{ color: "#999", fontSize: "12px", marginBottom: "8px" }}>{files.length} file(s) selected</p>
+      )}
+      <button
+        onClick={upload}
+        disabled={loading || files.length === 0}
+        style={{ padding: "4px 16px", background: "none", border: "1px solid #ddd", borderRadius: "4px", fontSize: "12px", color: "#666", cursor: "pointer" }}
+      >
         {loading ? "Attaching..." : "Attach"}
       </button>
       {result && !result.error && (
-        <p style={{ color: "#999", fontSize: "12px", marginTop: "8px", fontFamily: "Georgia, serif" }}>✓ {result.message}</p>
+        <div style={{ marginTop: "12px" }}>
+          <p style={{ fontSize: "12px", color: "#999", fontFamily: "Georgia, serif" }}>✓ {result.message}</p>
+          {result.products && result.products.map((p, i) => (
+            <p key={i} style={{ fontSize: "12px", color: "#999", margin: "2px 0" }}>📦 {p}</p>
+          ))}
+        </div>
+      )}
+      {result && result.error && (
+        <p style={{ color: "#f0a0a0", marginTop: "12px", fontSize: "13px" }}>❌ {result.error}</p>
       )}
     </div>
   );
@@ -277,9 +314,25 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState({ 1: [], 2: [], 3: [] });
 
   return (
-    <div style={{ minHeight: "100vh", background: "#ffffff", color: "#333", fontFamily: "Georgia, serif", maxWidth: "720px", margin: "0 auto", padding: "0", display: "flex", flexDirection: "column" }}>
-
-      <div style={{ display: "flex", alignItems: "center", padding: "6px 16px", borderBottom: "1px solid #eee", background: "#fafafa", gap: "4px" }}>
+    <div style={{
+      minHeight: "100vh",
+      background: "#ffffff",
+      color: "#333",
+      fontFamily: "Georgia, serif",
+      maxWidth: "720px",
+      margin: "0 auto",
+      padding: "0",
+      display: "flex",
+      flexDirection: "column"
+    }}>
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        padding: "6px 16px",
+        borderBottom: "1px solid #eee",
+        background: "#fafafa",
+        gap: "4px"
+      }}>
         <button onClick={() => setPage("notes")} style={{ padding: "3px 10px", background: page === "notes" ? "#e8e8e8" : "none", border: "none", borderRadius: "3px", fontSize: "12px", color: "#555", cursor: "pointer" }}>
           Notes
         </button>
@@ -298,7 +351,15 @@ export default function App() {
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                style={{ padding: "3px 10px", background: activeTab === tab ? "#e8e8e8" : "none", border: "none", borderRadius: "3px", fontSize: "12px", color: "#555", cursor: "pointer" }}
+                style={{
+                  padding: "3px 10px",
+                  background: activeTab === tab ? "#e8e8e8" : "none",
+                  border: "none",
+                  borderRadius: "3px",
+                  fontSize: "12px",
+                  color: "#555",
+                  cursor: "pointer"
+                }}
               >
                 {tab === 1 ? "Doc 1" : tab === 2 ? "Doc 2" : tab === 3 ? "Doc 3" : "Doc 4"}
               </button>

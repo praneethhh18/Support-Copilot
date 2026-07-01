@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from supabase import create_client
@@ -6,6 +6,7 @@ import boto3
 import json
 import os
 import uuid
+from typing import List
 
 load_dotenv()
 
@@ -91,30 +92,34 @@ def ask_nova(prompt: str, max_tokens: int = 800):
     )
     return response["output"]["message"]["content"][0]["text"]
 
-def parse_product_file(text: str):
-    products = []
-    blocks = text.strip().split("\n\n")
-    for block in blocks:
-        if not block.strip():
-            continue
-        product = {}
-        for line in block.strip().split("\n"):
-            if ":" in line:
-                key, _, value = line.partition(":")
-                key = key.strip().upper()
-                value = value.strip()
-                if key == "PRODUCT":
-                    product["name"] = value
-                elif key == "DESCRIPTION":
-                    product["description"] = value
-                elif key == "PRICE":
-                    product["price"] = value
-                elif key == "DISCOUNT":
-                    product["discount"] = value
-                elif key == "BEST FOR":
-                    product["best_for"] = value
-        if "name" in product:
-            products.append(product)
+def ai_parse_products(text: str):
+    prompt = f"""You are a product data extractor. Read the following messy product information and extract all products from it.
+
+For each product you find, return a JSON array with objects containing these exact keys:
+- name: product name
+- description: what the product does
+- price: pricing information
+- discount: any discounts or offers (use "None" if not mentioned)
+- best_for: what type of customer or problem this product is best for
+
+Return ONLY a valid JSON array, nothing else. No markdown, no backticks, no explanation.
+If you find multiple products, include all of them in the array.
+
+Product information:
+{text}"""
+
+    response = bedrock.converse(
+        modelId="us.amazon.nova-pro-v1:0",
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": 2000}
+    )
+    
+    raw = response["output"]["message"]["content"][0]["text"].strip()
+    
+    # Clean any markdown if present
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    
+    products = json.loads(raw)
     return products
 
 @app.get("/")
@@ -167,32 +172,39 @@ async def upload_transcript(file: UploadFile = File(...)):
     }
 
 @app.post("/upload-products")
-async def upload_products(file: UploadFile = File(...)):
-    content = await file.read()
-    text = content.decode("utf-8")
+async def upload_products(files: List[UploadFile] = File(...)):
+    all_products = []
+    total_count = 0
 
-    products = parse_product_file(text)
+    for file in files:
+        content = await file.read()
+        text = content.decode("utf-8")
 
-    if not products:
-        return {"error": "No products found. Check file format."}
+        try:
+            products = ai_parse_products(text)
+        except Exception as e:
+            return {"error": f"Failed to parse {file.filename}: {str(e)}"}
 
-    count = 0
-    for product in products:
-        embed_text = f"{product.get('name','')} {product.get('description','')} {product.get('best_for','')}"
-        embedding = get_embedding(embed_text)
-        supabase.table("products").insert({
-            "name": product.get("name", ""),
-            "description": product.get("description", ""),
-            "price": product.get("price", ""),
-            "discount": product.get("discount", ""),
-            "best_for": product.get("best_for", ""),
-            "embedding": embedding
-        }).execute()
-        count += 1
+        for product in products:
+            try:
+                embed_text = f"{product.get('name','')} {product.get('description','')} {product.get('best_for','')}"
+                embedding = get_embedding(embed_text)
+                supabase.table("products").insert({
+                    "name": product.get("name", ""),
+                    "description": product.get("description", ""),
+                    "price": product.get("price", ""),
+                    "discount": product.get("discount", ""),
+                    "best_for": product.get("best_for", ""),
+                    "embedding": embedding
+                }).execute()
+                all_products.append(product.get("name", ""))
+                total_count += 1
+            except Exception as e:
+                continue
 
     return {
-        "message": f"{count} products uploaded successfully",
-        "products": [p["name"] for p in products]
+        "message": f"{total_count} products uploaded from {len(files)} file(s)",
+        "products": all_products
     }
 
 @app.post("/chat")
@@ -202,7 +214,6 @@ async def chat(payload: dict):
     if not messages:
         return {"error": "No messages provided"}
 
-    # Build full conversation history
     history = ""
     all_customer_info = []
     for msg in messages[:-1]:
@@ -215,10 +226,8 @@ async def chat(payload: dict):
     latest_message = messages[-1]["content"]
     all_customer_info.append(latest_message)
 
-    # Combine all customer info for better embedding search
     full_context_query = " ".join(all_customer_info)
 
-    # Search KB using combined context for better retrieval
     query_embedding = get_embedding(full_context_query)
 
     result = supabase.rpc("match_chunks", {
@@ -231,7 +240,6 @@ async def chat(payload: dict):
         "match_count": 3
     }).execute()
 
-    # Build KB context
     kb_context = ""
     sources = []
     if result.data:
@@ -239,7 +247,6 @@ async def chat(payload: dict):
             kb_context += f"\n--- Past Case {i+1} ---\n{chunk['content']}\n"
             sources.append(chunk.get("transcript_id", "unknown"))
 
-    # Build product context
     product_context = ""
     if product_result.data:
         for p in product_result.data:
@@ -251,7 +258,6 @@ async def chat(payload: dict):
 RELEVANT PRODUCTS (suggest only if genuinely fits customer's problem):
 {product_context}"""
 
-    # Master prompt
     prompt = f"""You are an expert customer support assistant for a company providing network solutions, email hosting, domain management, and account services for SIS companies.
 
 Your job is to help the support agent handle this live customer chat. Read everything carefully before responding.
@@ -287,7 +293,7 @@ NEXT STEP:
 
 === STRICT RULES ===
 - If customer already said their email client is Outlook — do NOT ask what email client they use
-- If customer mentioned when issue started — do NOT ask when it started  
+- If customer mentioned when issue started — do NOT ask when it started
 - Each response must MOVE THE CONVERSATION FORWARD
 - If KB cases found: reference them explicitly in your resolution
 - If NO KB cases: say "No matching case in KB" but still help based on conversation
