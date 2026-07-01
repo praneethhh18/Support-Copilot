@@ -74,7 +74,7 @@ def auto_detect_status(text: str):
         return "solved"
     return "unsolved"
 
-def ask_nova(prompt: str, max_tokens: int = 800):
+def ask_nova(prompt: str, max_tokens: int = 1000):
     response = bedrock.converse(
         modelId="us.amazon.nova-pro-v1:0",
         messages=[{"role": "user", "content": [{"text": prompt}]}],
@@ -90,13 +90,13 @@ Extract ALL distinct issues discussed in this conversation. For each issue creat
 Return a JSON array only — no markdown, no backticks, no explanation.
 
 Each object must have:
-- issue: what the customer's problem was (specific, detailed)
+- issue: what the customer problem was (specific, detailed)
 - root_cause: what was actually causing it
-- resolution: exactly how it was fixed (step by step if possible)
-- internal_steps: what the agent did internally to fix it (which tools, which settings)
+- resolution: exactly how it was fixed step by step
+- internal_steps: what the agent did internally to fix it which tools which settings
 - category: email / domain / network / account / billing / hosting / database / general
 - was_escalated: true or false
-- escalation_reason: why it was escalated (or null if not escalated)
+- escalation_reason: why it was escalated or null if not escalated
 - keywords: list of 5-10 search keywords for this issue
 
 Transcript:
@@ -112,7 +112,6 @@ Return ONLY valid JSON array. Nothing else."""
 
     raw = response["output"]["message"]["content"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
-
     issues = json.loads(raw)
     return issues
 
@@ -129,14 +128,14 @@ KEYWORDS: {', '.join(issue.get('keywords', []))}"""
 def ai_parse_products(text: str):
     prompt = f"""You are a product data extractor. Read the following messy product information and extract all products from it.
 
-For each product you find, return a JSON array with objects containing these exact keys:
+For each product return a JSON array with objects containing:
 - name: product name
 - description: what the product does
 - price: pricing information
-- discount: any discounts or offers (use "None" if not mentioned)
+- discount: any discounts or offers use None if not mentioned
 - best_for: what type of customer or problem this product is best for
 
-Return ONLY a valid JSON array, nothing else. No markdown, no backticks, no explanation.
+Return ONLY valid JSON array. No markdown, no backticks, no explanation.
 
 Product information:
 {text}"""
@@ -184,7 +183,6 @@ async def upload_transcript(file: UploadFile = File(...)):
         "status": status
     }).execute()
 
-    # Smart chunking — extract structured issues instead of raw word chunks
     try:
         issues = extract_issues_from_transcript(text)
         chunks_created = 0
@@ -197,8 +195,7 @@ async def upload_transcript(file: UploadFile = File(...)):
                 "embedding": embedding
             }).execute()
             chunks_created += 1
-    except Exception as e:
-        # Fallback to basic chunking if extraction fails
+    except Exception:
         words = text.split()
         chunks_created = 0
         i = 0
@@ -257,6 +254,31 @@ async def upload_products(files: List[UploadFile] = File(...)):
         "products": all_products
     }
 
+@app.post("/upload-tools")
+async def upload_tools(files: List[UploadFile] = File(...)):
+    total_count = 0
+    tool_names = []
+
+    for file in files:
+        content = await file.read()
+        text = content.decode("utf-8")
+
+        embedding = get_embedding(text[:8000])
+
+        supabase.table("tools").insert({
+            "filename": file.filename,
+            "raw_content": text,
+            "embedding": embedding
+        }).execute()
+
+        total_count += 1
+        tool_names.append(file.filename)
+
+    return {
+        "message": f"{total_count} tool(s) uploaded successfully",
+        "tools": tool_names
+    }
+
 @app.post("/chat")
 async def chat(payload: dict):
     messages = payload.get("messages", [])
@@ -292,6 +314,11 @@ async def chat(payload: dict):
         "match_count": 3
     }).execute()
 
+    tools_result = supabase.rpc("match_tools", {
+        "query_embedding": query_embedding,
+        "match_count": 2
+    }).execute()
+
     kb_context = ""
     sources = []
     if result.data:
@@ -304,85 +331,118 @@ async def chat(payload: dict):
         for p in product_result.data:
             product_context += f"\n- {p['name']}: {p['description']} | Price: {p['price']} | Discount: {p['discount']} | Best for: {p['best_for']}\n"
 
+    tools_context = ""
+    if tools_result.data:
+        for t in tools_result.data:
+            tools_context += f"\n--- Tool: {t['filename']} ---\n{t['raw_content']}\n"
+
     pitch_section = ""
     if product_context:
         pitch_section = f"""
-RELEVANT PRODUCTS (suggest only if genuinely fits customer problem):
+AVAILABLE PRODUCTS FOR PITCH:
 {product_context}"""
 
-    prompt = f"""You are an expert customer support assistant for a company providing network solutions, email hosting, domain management, and account services.
+    tools_section = ""
+    if tools_context:
+        tools_section = f"""
+=== INTERNAL TOOLS AVAILABLE ===
+{tools_context}"""
 
-Your job is to help the support agent handle this live customer chat. Read everything carefully before responding.
+    prompt = f"""You are an expert customer support co-pilot for a company providing network solutions, email hosting, domain management, and account services.
+
+You are helping a live support agent handle a customer chat in real time.
+
+The agent's KPIs are:
+- FCR (First Contact Resolution): Resolve in ONE interaction — always push toward this
+- AHT: Target is 1350 seconds (22.5 minutes) — help agent be fast and efficient  
+- CSAT: 5 star customer satisfaction — guide tone and resolution quality
+- Sales: Pitch relevant products customer does NOT already own, or renew expiring domains/services
+- Escalation accuracy: Only escalate when truly necessary — wrong escalation kills KPI
 
 === FULL CONVERSATION SO FAR ===
 {history if history else "This is the first customer message."}
 
-{"=== YOUR INTERNAL NOTE ===" if is_internal_note else "=== LATEST CUSTOMER MESSAGE ==="}
+{"=== AGENT INTERNAL NOTE ===" if is_internal_note else "=== LATEST CUSTOMER MESSAGE ==="}
 {latest_message.replace("//", "").strip()}
-{"[This is an internal note from the agent — do NOT generate REPLY TO CUSTOMER. Just answer the agent question directly based on conversation and KB.]" if is_internal_note else ""}
+{"[Agent internal note — skip REPLY TO CUSTOMER section. Answer agent question directly using conversation context and KB.]" if is_internal_note else ""}
 
 === SIMILAR PAST CASES FROM KNOWLEDGE BASE ===
 {kb_context if kb_context else "NO SIMILAR CASES FOUND IN KB."}
-{pitch_section}
 
-=== YOUR RESPONSE RULES ===
-1. Read the ENTIRE conversation history first
-2. Note everything the customer has ALREADY told you — never ask about it again
-3. Use past cases from KB as reference — if KB has relevant cases, base your answer on them
-4. If KB has NO relevant cases, help based on conversation context only
+{tools_section}
+
+{pitch_section}
 
 === YOUR RESPONSE FORMAT ===
 
-REPLY TO CUSTOMER (copy-paste this directly):
-[Write a short 1-2 line professional reply personalized to exactly what this customer said.
-Follow EAR — Empathy + Acknowledgment + Reassurance.
-- Empathy: show you understand their specific situation
-- Acknowledgment: reference exactly what they told you (their product, their issue)
-- Reassurance: assure them you are on it right now
-Rules for the reply:
-- Never start with "That's really frustrating" or "Oh no" or "I sincerely apologize"
-- Never apologize unless the issue is clearly on your company's side
-- Never use generic phrases like "I understand your concern"
-- Be warm, professional, personalized, short — max 2 lines
-- End with positive energy showing you are taking action
-- Personalize to their exact situation — mention what they specifically said]
+REPLY TO CUSTOMER (copy-paste directly):
+[Short 1-2 line professional reply following EAR — Empathy + Acknowledgment + Reassurance.
+- If customer is frustrated or angry: use calm warm de-escalation language. Acknowledge their specific frustration. Never be defensive.
+- If customer is calm: be warm professional action-oriented
+- Never say "That's frustrating" / "Oh no" / "I sincerely apologize" / "I understand your concern"
+- Never apologize unless issue is clearly your company's fault
+- Personalize to exactly what they said — mention their specific issue and situation
+- Max 2 lines. End with a positive action statement showing you are on it.]
 
 TONE & URGENCY:
-[Detect customer emotional state: Angry / Frustrated / Calm / Confused]
-[Urgency: High / Medium / Low — based on business impact]
+Emotion: [Angry / Frustrated / Calm / Confused]
+Urgency: [High / Medium / Low — based on business impact]
+AHT: [Simple / Moderate / Complex — warn if this may exceed 22.5 min target]
 
 SITUATION SO FAR:
-[Summarize what we know from full conversation in 1-2 lines]
+[1-2 lines — exact summary of what we know from full conversation]
 
 LIKELY ISSUE:
-[Most probable cause based on ALL information gathered — be specific, not generic]
+[Specific root cause — reference KB past case if available. Never generic.]
 
 WHAT TO DO INTERNALLY:
-[Exact steps to check or fix on your end — reference specific tools and settings from past cases if available]
+[Step by step exact navigation using internal tools if available:
+- Which tool to open
+- Exact path to get there
+- What to look for
+- What to change or check
+- Reference KB internal steps if similar case found]
+
+FCR GUIDANCE:
+[What you still need to gather or verify to close this in ONE interaction.
+What to confirm before closing. Push agent toward FCR.]
 
 NEXT PROBE TO ASK CUSTOMER:
-[ONE specific question not yet answered — or say "Enough info, proceed with resolution" if you have everything]
+[ONE specific question not yet answered — or "Enough info — proceed to resolution now" if ready to close]
 
 ESCALATION SIGNAL:
-[Based on similar past cases in KB:
-- If past cases show this was escalated: warn with reason why and when to escalate
-- If past cases show agent resolved it: say "Handle yourself — similar cases resolved at agent level"
-- If no past cases found: say "No escalation pattern found — use your judgment"]
+[Based on KB patterns and issue type:
+- Abuse issue → Create Abuse Case
+- Fraud suspicion → Create Fraud Case
+- Billing dispute beyond agent authority → Create Billing Case
+- Customer threatening to leave → Create Retention Case
+- Technical issue beyond agent tool access → Technical Escalation
+- If KB shows similar cases were escalated: state reason
+- If KB shows agent resolved similar cases: "Handle yourself at agent level"
+- If unclear: "Attempt resolution first — escalate only if tools insufficient"]
+
+PITCH OPPORTUNITY:
+[Assess based on conversation:
+- Only pitch what customer likely does NOT already own
+- If domain or service expiry mentioned: suggest renewal
+- If issue caused by missing product: suggest it as solution
+- Suggest ONE product with price and discount
+- Frame as helpful not pushy — "This would prevent this issue in future"
+- If nothing fits naturally: "No pitch opportunity this interaction"]
 
 CLOSING MESSAGE (copy-paste after resolution):
-[Short warm professional closing — invite feedback naturally without directly asking for rating]
-
-{"PITCH: [Suggest relevant product only if it directly solves their problem — include price and discount]" if product_context else ""}
+[Warm short professional closing. Thank them by situation. Confirm what was resolved. Invite them to reach out anytime. Naturally encourage feedback without directly asking for rating.]
 
 === STRICT RULES ===
-- If customer already mentioned their email client — do NOT ask again
-- If customer mentioned when issue started — do NOT ask again
-- Each response must MOVE THE CONVERSATION FORWARD
-- If KB cases found: reference them explicitly in resolution
-- If NO KB cases: say "No matching case in KB" but still help
-- Never give generic advice — be specific to what this customer told you
-- If issue resolved: say "Issue resolved: [what fixed it]"
-- REPLY TO CUSTOMER must always be first section"""
+- Never ask about something customer already told you in this conversation
+- Every response must move conversation forward toward FCR
+- If KB case found: use its exact resolution steps and internal steps
+- If no KB case: help based on conversation and tools context
+- Be specific — no generic advice ever
+- Frustrated customer: de-escalate first then resolve
+- Always assess pitch opportunity even if answer is no pitch
+- Always push toward resolving in this single interaction
+- REPLY TO CUSTOMER is always the first section — agent copies and pastes this immediately"""
 
     nova_response = ask_nova(prompt)
 
