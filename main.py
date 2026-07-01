@@ -294,6 +294,10 @@ Rules for the reply:
 - End with positive energy showing you are taking action
 - Personalize to their exact situation — mention what they specifically said]
 
+TONE & URGENCY:
+[Detect customer's emotional state: Angry / Frustrated / Calm / Confused]
+[Urgency: High / Medium / Low — based on business impact of their issue]
+
 SITUATION SO FAR:
 [Summarize what we know from the full conversation in 1-2 lines]
 
@@ -305,6 +309,16 @@ WHAT TO DO INTERNALLY:
 
 NEXT PROBE TO ASK CUSTOMER:
 [ONE specific question not yet answered — or say "Enough info, proceed with resolution" if you have everything needed]
+
+ESCALATION SIGNAL:
+[Based on similar past cases in KB:
+- If past cases show this was escalated: warn with reason why and when to escalate
+- If past cases show agent resolved it: say "Handle yourself — similar cases resolved at agent level"
+- If no past cases found: say "No escalation pattern found — use your judgment"
+Never blindly escalate — always check KB pattern first]
+
+CLOSING MESSAGE (copy-paste after resolution):
+[A short warm professional closing message to send customer after issue is resolved — asking if everything is fine and inviting 5 star feedback naturally without directly asking for it]
 
 {"PITCH: [Suggest relevant product only if it directly solves their problem — include price and discount]" if product_context else ""}
 
