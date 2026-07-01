@@ -224,7 +224,10 @@ async def chat(payload: dict):
             history += f"Agent Co-Pilot: {msg['content']}\n"
 
     latest_message = messages[-1]["content"]
-    all_customer_info.append(latest_message)
+    is_internal_note = latest_message.startswith("//")
+    
+    if not is_internal_note:
+        all_customer_info.append(latest_message)
 
     full_context_query = " ".join(all_customer_info)
 
@@ -265,8 +268,9 @@ Your job is to help the support agent handle this live customer chat. Read every
 === FULL CONVERSATION SO FAR ===
 {history if history else "This is the first customer message."}
 
-=== LATEST CUSTOMER MESSAGE ===
-{latest_message}
+{"=== YOUR INTERNAL NOTE ===" if is_internal_note else "=== LATEST CUSTOMER MESSAGE ==="}
+{latest_message.replace("//", "").strip()}
+{"[This is an internal note from the agent — do NOT generate a REPLY TO CUSTOMER section. Just answer the agent's question directly and helpfully based on the conversation context and KB.]" if is_internal_note else ""}
 
 === SIMILAR PAST CASES FROM KNOWLEDGE BASE ===
 {kb_context if kb_context else "NO SIMILAR CASES FOUND IN KB."}
