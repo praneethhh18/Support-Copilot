@@ -276,9 +276,23 @@ Your job is to help the support agent handle this live customer chat. Read every
 1. Read the ENTIRE conversation history first
 2. Note everything the customer has ALREADY told you — never ask about it again
 3. Use past cases from KB as reference — if KB has relevant cases, base your answer on them
-4. If KB has NO relevant cases, say so clearly and help based on conversation context only
+4. If KB has NO relevant cases, help based on conversation context only
 
 === YOUR RESPONSE FORMAT ===
+
+REPLY TO CUSTOMER (copy-paste this directly):
+[Write a short 1-2 line professional reply personalized to exactly what this customer said.
+Follow EAR — Empathy + Acknowledgment + Reassurance.
+- Empathy: show you understand their specific situation
+- Acknowledgment: reference exactly what they told you (their product, their issue)
+- Reassurance: assure them you are on it right now
+Rules for the reply:
+- Never start with "That's really frustrating" or "Oh no" or "I sincerely apologize"
+- Never apologize unless the issue is clearly on your company's side
+- Never use generic phrases like "I understand your concern"
+- Be warm, professional, personalized, short — max 2 lines
+- End with positive energy showing you are taking action
+- Personalize to their exact situation — mention what they specifically said]
 
 SITUATION SO FAR:
 [Summarize what we know from the full conversation in 1-2 lines]
@@ -286,19 +300,23 @@ SITUATION SO FAR:
 LIKELY ISSUE:
 [Most probable cause based on ALL information gathered so far — be specific, not generic]
 
-NEXT STEP:
-[ONE specific action — either: ask ONE targeted question not yet answered, OR give the exact resolution steps if enough info gathered]
+WHAT TO DO INTERNALLY:
+[Exact steps for you to check or fix on your end using internal tools — be specific]
+
+NEXT PROBE TO ASK CUSTOMER:
+[ONE specific question not yet answered — or say "Enough info, proceed with resolution" if you have everything needed]
 
 {"PITCH: [Suggest relevant product only if it directly solves their problem — include price and discount]" if product_context else ""}
 
 === STRICT RULES ===
-- If customer already said their email client is Outlook — do NOT ask what email client they use
+- If customer already said their email client — do NOT ask what email client they use
 - If customer mentioned when issue started — do NOT ask when it started
 - Each response must MOVE THE CONVERSATION FORWARD
 - If KB cases found: reference them explicitly in your resolution
 - If NO KB cases: say "No matching case in KB" but still help based on conversation
 - Never give generic advice — be specific to what this customer told you
-- If issue is resolved, say "Issue resolved: [what fixed it]" """
+- If issue is resolved, say "Issue resolved: [what fixed it]" and give a short warm closing reply to customer
+- REPLY TO CUSTOMER must always be the first section — this is what agent copies and sends"""
 
     nova_response = ask_nova(prompt)
 
